@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 class ComprehensiveFBrefCollector:
     """Comprehensive FBref data collector for MCP Soccer Server"""
     
-    def __init__(self, season: str = "2024-25"):
-        self.season = season
+    def __init__(self, seasons: List[str] = None):
+        if seasons is None:
+            seasons = ["2024-25"]
+        self.seasons = seasons if isinstance(seasons, list) else [seasons]
         self.leagues = [
             "ENG-Premier League",
             "ESP-La Liga", 
@@ -31,29 +33,25 @@ class ComprehensiveFBrefCollector:
             "FRA-Ligue 1"
         ]
         
-        # Initialize FBref scraper
-        self.fbref = sd.FBref(leagues=self.leagues, seasons=self.season)
-        
         # Create directory structure
         self.setup_directories()
         
-        logger.info(f"🚀 Initialized FBref collector for {season} season")
+        logger.info(f"🚀 Initialized FBref collector for seasons: {', '.join(self.seasons)}")
     
     def setup_directories(self):
         """Create organized directory structure"""
-        self.base_dir = Path("soccer-mcp")
-        self.data_dir = self.base_dir / "data"
+        self.data_dir = Path("data")
         self.raw_dir = self.data_dir / "raw"
         self.processed_dir = self.data_dir / "processed"
         
         # Create directories
-        for directory in [self.base_dir, self.data_dir, self.raw_dir, self.processed_dir]:
+        for directory in [self.data_dir, self.raw_dir, self.processed_dir]:
             directory.mkdir(exist_ok=True)
             
-        logger.info(f"📁 Directory structure created: {self.base_dir}")
+        logger.info(f"📁 Directory structure created: {self.data_dir}")
     
     def collect_all_player_data(self) -> Dict[str, pd.DataFrame]:
-        """Collect all available FBref player data"""
+        """Collect all available FBref player data for all seasons"""
         
         logger.info("📊 Starting comprehensive FBref data collection...")
         all_data = {}
@@ -73,40 +71,56 @@ class ComprehensiveFBrefCollector:
             'keeper_adv': ('read_player_season_stats', 'keeper_adv')
         }
         
-        for stat_name, (method_name, stat_type) in stat_types.items():
-            try:
-                logger.info(f"📈 Collecting {stat_name} stats...")
-                
-                # Get the method and call it with stat_type parameter
-                method = getattr(self.fbref, method_name, None)
-                if method:
-                    data = method(stat_type=stat_type)
+        # Collect data for each season
+        for season in self.seasons:
+            logger.info(f"🗓️  Collecting data for season: {season}")
+            
+            # Initialize FBref scraper for this season
+            fbref = sd.FBref(leagues=self.leagues, seasons=season)
+            
+            for stat_name, (method_name, stat_type) in stat_types.items():
+                try:
+                    logger.info(f"📈 Collecting {stat_name} stats for {season}...")
                     
-                    if data is not None and not data.empty:
-                        # Reset index to get player and team as columns
-                        if isinstance(data.index, pd.MultiIndex):
-                            data = data.reset_index()
+                    # Get the method and call it with stat_type parameter
+                    method = getattr(fbref, method_name, None)
+                    if method:
+                        data = method(stat_type=stat_type)
                         
-                        all_data[stat_name] = data
-                        logger.info(f"✅ {stat_name}: {len(data)} records collected")
-                        
-                        # Save raw data
-                        raw_file = self.raw_dir / f"fbref_{stat_name}_{self.season}.csv"
-                        data.to_csv(raw_file, index=False)
-                        logger.info(f"💾 Saved raw data: {raw_file}")
+                        if data is not None and not data.empty:
+                            # Reset index to get player and team as columns
+                            if isinstance(data.index, pd.MultiIndex):
+                                data = data.reset_index()
+                            
+                            # Add season column
+                            data['season'] = season
+                            
+                            # Combine with existing data if it exists
+                            key = stat_name
+                            if key in all_data:
+                                all_data[key] = pd.concat([all_data[key], data], ignore_index=True)
+                            else:
+                                all_data[key] = data
+                            
+                            logger.info(f"✅ {stat_name} ({season}): {len(data)} records collected")
+                            
+                            # Save raw data by season
+                            raw_file = self.raw_dir / f"fbref_{stat_name}_{season}.csv"
+                            data.to_csv(raw_file, index=False)
+                            logger.info(f"💾 Saved raw data: {raw_file}")
+                        else:
+                            logger.warning(f"⚠️  No data returned for {stat_name} ({season})")
                     else:
-                        logger.warning(f"⚠️  No data returned for {stat_name}")
-                else:
-                    logger.warning(f"⚠️  Method {method_name} not found")
-                
-                # Rate limiting to be respectful to FBref
-                time.sleep(2)
-                
-            except Exception as e:
-                logger.error(f"❌ Error collecting {stat_name}: {e}")
-                continue
+                        logger.warning(f"⚠️  Method {method_name} not found")
+                    
+                    # Rate limiting to be respectful to FBref
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error collecting {stat_name} for {season}: {e}")
+                    continue
         
-        logger.info(f"🎉 Data collection complete! Collected {len(all_data)} stat types")
+        logger.info(f"🎉 Data collection complete! Collected {len(all_data)} stat types across {len(self.seasons)} seasons")
         return all_data
     
     def standardize_data_formats(self, all_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
@@ -222,8 +236,7 @@ class ComprehensiveFBrefCollector:
                     # Remove country codes in parentheses
                     df['player'] = df['player'].str.replace(r'\s+\([^)]*\)', '', regex=True)
                 
-                # Add season and stat_type columns
-                df['season'] = self.season
+                # Add stat_type column (season already added during collection)
                 df['stat_type'] = stat_type
                 
                 # Convert numeric columns
@@ -357,7 +370,7 @@ class ComprehensiveFBrefCollector:
             'teams': unified_df['team'].nunique() if 'team' in unified_df.columns else 0,
             'positions': unified_df['position'].nunique() if 'position' in unified_df.columns else 0,
             'columns': len(unified_df.columns),
-            'season': self.season,
+            'seasons': self.seasons,
             'created': datetime.now().isoformat()
         }
         
@@ -423,9 +436,18 @@ def main():
     print("🚀 FBref Comprehensive Data Collector")
     print("=====================================")
     
+    # Get seasons from command line arguments or use defaults
+    import sys
+    if len(sys.argv) > 1:
+        seasons = sys.argv[1:]
+        print(f"📅 Collecting data for seasons: {', '.join(seasons)}")
+    else:
+        seasons = ["2023-24", "2024-25", "2025-26"]
+        print(f"📅 No seasons specified, using defaults: {', '.join(seasons)}")
+    
     try:
-        # Initialize collector
-        collector = ComprehensiveFBrefCollector()
+        # Initialize collector with multiple seasons
+        collector = ComprehensiveFBrefCollector(seasons=seasons)
         
         # Run complete collection pipeline
         result = collector.run_complete_collection()
@@ -433,6 +455,7 @@ def main():
         if result is not None and not result.empty:
             print("\n✅ SUCCESS! Your comprehensive FBref data is ready for the MCP server.")
             print(f"📁 Data location: {collector.data_dir}")
+            print(f"📊 Total seasons collected: {len(seasons)}")
             print("🔧 Next step: Run your MCP server with this data!")
         else:
             print("\n❌ FAILED! Could not collect data.")
