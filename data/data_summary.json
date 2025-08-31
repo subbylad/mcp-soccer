@@ -1,13 +1,11 @@
 {
-  "total_players": 7431,
-  "leagues": 6,
-  "teams": 120,
-  "positions": 11,
+  "total_players": 7428,
+  "leagues": 5,
+  "teams": 119,
+  "positions": 10,
   "columns": 287,
   "seasons": [
-    "2023-24",
-    "2024-25",
-    "2025-26"
+    "2024-25"
   ],
-  "created": "2025-08-31T09:38:00.357327"
+  "created": "2025-08-31T10:04:50.418291"
 }

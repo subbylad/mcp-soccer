@@ -129,13 +129,13 @@ class ComprehensiveFBrefCollector:
         logger.info("🔧 Standardizing data formats...")
         standardized_data = {}
         
-        # Column mapping for consistency
+        # Column mapping for consistency - matches server expectations
         column_mappings = {
-            # Standard player info columns (includes variations from FBref)
+            # Basic info columns
             'Player': 'player',
             'player': 'player',
-            'level_0': 'player',  # Common when reseting MultiIndex
-            'level_1': 'team',    # Common when reseting MultiIndex
+            'level_0': 'player',
+            'level_1': 'team',
             'Squad': 'team', 
             'team': 'team',
             'Comp': 'league',
@@ -145,66 +145,64 @@ class ComprehensiveFBrefCollector:
             'position': 'position',
             'Age': 'age',
             'age': 'age',
-            'MP': 'matches_played',
-            'matches_played': 'matches_played',
-            'Min': 'minutes_played',
-            'minutes_played': 'minutes_played',
+            'nation': 'nation',
+            'born': 'born',
+            'season': 'season',
             
-            # Performance stats
-            'Gls': 'goals',
-            'goals': 'goals',
-            'Ast': 'assists', 
-            'assists': 'assists',
-            'G+A': 'goals_assists',
-            'goals_assists': 'goals_assists',
-            'PK': 'penalty_goals',
-            'penalty_goals': 'penalty_goals',
-            'CrdY': 'yellow_cards',
-            'yellow_cards': 'yellow_cards',
-            'CrdR': 'red_cards',
-            'red_cards': 'red_cards',
-            
-            # Per 90 stats
-            'Gls.1': 'goals_per_90',
-            'goals_per_90': 'goals_per_90', 
-            'Ast.1': 'assists_per_90',
-            'assists_per_90': 'assists_per_90',
-            
-            # Expected stats
-            'xG': 'expected_goals',
-            'expected_goals': 'expected_goals',
-            'xA': 'expected_assists', 
-            'expected_assists': 'expected_assists',
-            'xG.1': 'expected_goals_per_90',
-            'expected_goals_per_90': 'expected_goals_per_90',
+            # Multi-level FBRef columns - match server expectations exactly
+            'playing_time_mp': 'playing_time_mp',
+            'playing_time_starts': 'playing_time_starts', 
+            'playing_time_min': 'playing_time_min',
+            'playing_time_90s': 'playing_time_90s',
+            'performance_gls': 'performance_gls',
+            'performance_ast': 'performance_ast',
+            'performance_g_a': 'performance_g_a',
+            'performance_g_pk': 'performance_g_pk',
+            'performance_pk': 'performance_pk',
+            'performance_pkatt': 'performance_pkatt',
+            'performance_crdy': 'performance_crdy',
+            'performance_crdr': 'performance_crdr',
+            'expected_xg': 'expected_xg',
+            'expected_npxg': 'expected_npxg',
+            'expected_xag': 'expected_xag',
+            'expected_npxg_xag': 'expected_npxg_xag',
+            'progression_prgc': 'progression_prgc',
+            'progression_prgp': 'progression_prgp',
+            'progression_prgr': 'progression_prgr',
+            'per_90_minutes_gls': 'per_90_minutes_gls',
+            'per_90_minutes_ast': 'per_90_minutes_ast',
+            'per_90_minutes_g_a': 'per_90_minutes_g_a',
+            'per_90_minutes_g_pk': 'per_90_minutes_g_pk',
+            'per_90_minutes_g_a_pk': 'per_90_minutes_g_a_pk',
+            'per_90_minutes_xg': 'per_90_minutes_xg',
+            'per_90_minutes_xag': 'per_90_minutes_xag',
+            'per_90_minutes_xg_xag': 'per_90_minutes_xg_xag',
+            'per_90_minutes_npxg': 'per_90_minutes_npxg',
+            'per_90_minutes_npxg_xag': 'per_90_minutes_npxg_xag',
             
             # Shooting stats
-            'Sh': 'shots',
-            'shots': 'shots',
-            'SoT': 'shots_on_target',
-            'shots_on_target': 'shots_on_target',
-            'SoT%': 'shots_on_target_pct',
-            'shots_on_target_pct': 'shots_on_target_pct',
-            
-            # Passing stats
-            'Cmp': 'passes_completed',
-            'passes_completed': 'passes_completed',
-            'Att': 'passes_attempted', 
-            'passes_attempted': 'passes_attempted',
-            'Cmp%': 'pass_completion_pct',
-            'pass_completion_pct': 'pass_completion_pct',
-            'PrgP': 'progressive_passes',
-            'progressive_passes': 'progressive_passes',
+            'standard_sh': 'standard_sh',
+            'standard_sot': 'standard_sot',
+            'standard_sot_pct': 'standard_sot_pct',
             
             # Defensive stats
-            'Tkl': 'tackles',
-            'tackles': 'tackles',
-            'Int': 'interceptions',
+            'tackles_tkl': 'tackles_tkl',
+            'tackles_tklw': 'tackles_tklw',
             'interceptions': 'interceptions',
-            'Blocks': 'blocks',
-            'blocks': 'blocks',
-            'Clr': 'clearances',
-            'clearances': 'clearances'
+            'blocks_blocks': 'blocks_blocks',
+            'clearances': 'clearances',
+            'aerial_duels_won_pct': 'aerial_duels_won_pct',
+            
+            # Passing stats  
+            'total_cmp_pct': 'total_cmp_pct',
+            'total_att': 'total_att',
+            'progressive_passes': 'progressive_passes',
+            'kp': 'kp',
+            'carries_prgc': 'carries_prgc',
+            'take_ons_succ': 'take-ons_succ',
+            'touches_att_pen': 'touches_att_pen',
+            'sca_sca': 'sca_sca',
+            'gca_gca': 'gca_gca'
         }
         
         for stat_type, data in all_data.items():
@@ -216,8 +214,22 @@ class ComprehensiveFBrefCollector:
                 new_columns = []
                 for col in df.columns:
                     if isinstance(col, tuple):
-                        # Handle multi-level column names
-                        col_str = '_'.join(str(part) for part in col if str(part) != 'nan' and str(part) != '')
+                        # Handle multi-level column names from FBRef
+                        category = str(col[0]).strip() if len(col) > 0 and str(col[0]) != 'nan' and 'Unnamed:' not in str(col[0]) else ''
+                        stat = str(col[1]).strip() if len(col) > 1 and str(col[1]) != 'nan' and 'level_' not in str(col[1]) else ''
+                        
+                        # For basic info columns (first few columns), use the stat name directly
+                        basic_info_stats = ['', 'league', 'season', 'team', 'player', 'nation', 'pos', 'age', 'born']
+                        if stat in basic_info_stats or category == '' or 'Unnamed:' in category:
+                            col_str = stat if stat else category
+                        else:
+                            # Create meaningful column names for actual stats
+                            if category and stat:
+                                col_str = f"{category}_{stat}".lower().replace(' ', '_').replace('.', '_').replace('%', '_pct').replace('+', '_').replace('-', '_').replace('(', '').replace(')', '')
+                            elif stat:
+                                col_str = stat.lower().replace(' ', '_').replace('.', '_').replace('%', '_pct').replace('+', '_').replace('-', '_').replace('(', '').replace(')', '')
+                            else:
+                                col_str = category.lower().replace(' ', '_').replace('.', '_').replace('%', '_pct').replace('+', '_').replace('-', '_').replace('(', '').replace(')', '')
                     else:
                         col_str = str(col)
                     
