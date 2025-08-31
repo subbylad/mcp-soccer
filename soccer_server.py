@@ -226,6 +226,8 @@ class EnhancedSoccerDataServer:
         age_max: Optional[int] = None,
         nationality: Optional[List[str]] = None,
         team: Optional[str] = None,
+        seasons: Optional[List[str]] = None,
+        latest_season_only: bool = False,
         min_minutes_played: Optional[int] = 500,
         stat_filters: Optional[Dict[str, float]] = None,
         limit: int = 100,
@@ -270,6 +272,19 @@ class EnhancedSoccerDataServer:
             
         if team:
             filtered = filtered[filtered['team'].str.contains(team, case=False, na=False)]
+        
+        # Season filtering
+        if seasons:
+            filtered = filtered[filtered['season'].isin(seasons)]
+        
+        # Latest season only mode
+        if latest_season_only:
+            # Get the most recent season for each player
+            latest_season_data = filtered.groupby('player')['season'].max().reset_index()
+            latest_season_data.columns = ['player', 'latest_season']
+            filtered = filtered.merge(latest_season_data, on='player')
+            filtered = filtered[filtered['season'] == filtered['latest_season']]
+            filtered = filtered.drop('latest_season', axis=1)
             
         if min_minutes_played:
             minutes_col = 'playing_time_min' if 'playing_time_min' in filtered.columns else 'playing_time_mp'
@@ -322,6 +337,7 @@ class EnhancedSoccerDataServer:
         age_range = scout_brief.get('age_range', {})
         physical_requirements = scout_brief.get('physical_requirements', {})
         technical_requirements = scout_brief.get('technical_requirements', {})
+        temporal_preferences = scout_brief.get('temporal_preferences', {})
         
         # Build statistical filters
         stat_filters = {}
@@ -337,6 +353,8 @@ class EnhancedSoccerDataServer:
             positions=positions,
             age_min=age_range.get('min'),
             age_max=age_range.get('max'),
+            seasons=temporal_preferences.get('seasons'),
+            latest_season_only=temporal_preferences.get('latest_season_only', False),
             stat_filters=stat_filters,
             limit=scout_brief.get('max_results', 50)
         )
@@ -346,11 +364,16 @@ class EnhancedSoccerDataServer:
         league: str,
         stat: str,
         position: Optional[str] = None,
+        season: Optional[str] = None,
         min_games: int = 15
     ) -> List[Dict[str, Any]]:
         """Get league leaders in specific statistics"""
         
         filtered = self.data[self.data['league'] == league].copy()
+        
+        # Season filtering
+        if season:
+            filtered = filtered[filtered['season'] == season]
         
         if position:
             filtered = filtered[filtered['position'].str.contains(position, case=False, na=False)]
@@ -565,6 +588,197 @@ class EnhancedSoccerDataServer:
             summary['defensive'] = f"Defender with solid defensive stats including {tackles} tackles."
         
         return summary
+    
+    def get_player_career_summary(
+        self,
+        player_name: str,
+        aggregation_mode: str = "latest"  # "latest", "career_avg", "best_season", "all_seasons"
+    ) -> Dict[str, Any]:
+        """Get player career summary with temporal analysis"""
+        
+        # Find all records for this player
+        player_data = self.data[self.data['player'].str.contains(player_name, case=False, na=False)]
+        
+        if len(player_data) == 0:
+            return {'error': f"Player '{player_name}' not found"}
+        
+        # Get exact name from first match
+        exact_name = player_data.iloc[0]['player']
+        player_data = self.data[self.data['player'] == exact_name]
+        
+        # Sort by season for progression analysis
+        player_data = player_data.sort_values('season')
+        
+        if aggregation_mode == "latest":
+            # Return most recent season only
+            latest_data = player_data.iloc[-1]
+            return self._format_single_season_data(latest_data, "Latest Season")
+            
+        elif aggregation_mode == "best_season":
+            # Find best season based on combined goal+assist output
+            if 'performance_gls' in player_data.columns and 'performance_ast' in player_data.columns:
+                player_data['combined_output'] = player_data['performance_gls'].fillna(0) + player_data['performance_ast'].fillna(0)
+                best_season_data = player_data.loc[player_data['combined_output'].idxmax()]
+                return self._format_single_season_data(best_season_data, "Best Season")
+            else:
+                return {'error': 'Insufficient data for best season analysis'}
+                
+        elif aggregation_mode == "career_avg":
+            # Calculate career averages
+            return self._calculate_career_averages(player_data)
+            
+        elif aggregation_mode == "all_seasons":
+            # Return all seasons with progression analysis
+            return self._analyze_player_progression(player_data)
+        
+        else:
+            return {'error': f"Unknown aggregation mode: {aggregation_mode}"}
+    
+    def _format_single_season_data(self, season_data, mode_label: str) -> Dict[str, Any]:
+        """Format single season data with proper age handling"""
+        
+        # Clean age format (handle "27-327" format)
+        age_str = str(season_data.get('age', '0'))
+        if '-' in age_str:
+            age = int(age_str.split('-')[0])
+        else:
+            age = int(float(age_str)) if age_str.replace('.', '').isdigit() else 0
+        
+        return {
+            'mode': mode_label,
+            'player': season_data.get('player', 'Unknown'),
+            'season': season_data.get('season', 'Unknown'),
+            'age_at_season': age,
+            'team': season_data.get('team', 'Unknown'),
+            'league': season_data.get('league', 'Unknown'),
+            'position': season_data.get('position', 'Unknown'),
+            'performance_stats': {
+                'goals': float(season_data.get('performance_gls', 0)) if pd.notna(season_data.get('performance_gls')) else 0,
+                'assists': float(season_data.get('performance_ast', 0)) if pd.notna(season_data.get('performance_ast')) else 0,
+                'minutes_played': float(season_data.get('playing_time_min', 0)) if pd.notna(season_data.get('playing_time_min')) else 0,
+                'games_played': int(season_data.get('playing_time_mp', 0)) if pd.notna(season_data.get('playing_time_mp')) else 0,
+                'expected_goals': float(season_data.get('expected_xg', 0)) if pd.notna(season_data.get('expected_xg')) else 0,
+                'expected_assists': float(season_data.get('expected_xag', 0)) if pd.notna(season_data.get('expected_xag')) else 0
+            }
+        }
+    
+    def _calculate_career_averages(self, player_data) -> Dict[str, Any]:
+        """Calculate career averages across all seasons"""
+        
+        # Get basic info from most recent season
+        latest = player_data.iloc[-1]
+        
+        # Calculate weighted averages and totals
+        total_minutes = player_data['playing_time_min'].fillna(0).sum()
+        total_games = player_data['playing_time_mp'].fillna(0).sum()
+        total_goals = player_data['performance_gls'].fillna(0).sum()
+        total_assists = player_data['performance_ast'].fillna(0).sum()
+        
+        # Career averages per season
+        seasons_played = len(player_data)
+        avg_goals_per_season = total_goals / seasons_played if seasons_played > 0 else 0
+        avg_assists_per_season = total_assists / seasons_played if seasons_played > 0 else 0
+        
+        return {
+            'mode': 'Career Average',
+            'player': latest.get('player', 'Unknown'),
+            'seasons_analyzed': list(player_data['season'].unique()),
+            'total_seasons': seasons_played,
+            'current_age': self._extract_age(latest.get('age', 0)),
+            'current_team': latest.get('team', 'Unknown'),
+            'position': latest.get('position', 'Unknown'),
+            'career_totals': {
+                'total_goals': float(total_goals),
+                'total_assists': float(total_assists),
+                'total_minutes': float(total_minutes),
+                'total_games': int(total_games)
+            },
+            'career_averages': {
+                'goals_per_season': round(avg_goals_per_season, 2),
+                'assists_per_season': round(avg_assists_per_season, 2),
+                'minutes_per_season': round(total_minutes / seasons_played, 0) if seasons_played > 0 else 0,
+                'games_per_season': round(total_games / seasons_played, 1) if seasons_played > 0 else 0
+            }
+        }
+    
+    def _analyze_player_progression(self, player_data) -> Dict[str, Any]:
+        """Analyze player progression across seasons"""
+        
+        # Sort by season
+        player_data = player_data.sort_values('season')
+        latest = player_data.iloc[-1]
+        
+        # Calculate season-by-season progression
+        season_progression = []
+        for _, season in player_data.iterrows():
+            season_summary = {
+                'season': season.get('season', 'Unknown'),
+                'age': self._extract_age(season.get('age', 0)),
+                'team': season.get('team', 'Unknown'),
+                'league': season.get('league', 'Unknown'),
+                'goals': float(season.get('performance_gls', 0)) if pd.notna(season.get('performance_gls')) else 0,
+                'assists': float(season.get('performance_ast', 0)) if pd.notna(season.get('performance_ast')) else 0,
+                'minutes': float(season.get('playing_time_min', 0)) if pd.notna(season.get('playing_time_min')) else 0,
+                'expected_goals': float(season.get('expected_xg', 0)) if pd.notna(season.get('expected_xg')) else 0
+            }
+            season_progression.append(season_summary)
+        
+        # Calculate trends (improvement/decline)
+        trend_analysis = self._calculate_performance_trends(season_progression)
+        
+        return {
+            'mode': 'All Seasons Progression',
+            'player': latest.get('player', 'Unknown'),
+            'current_age': self._extract_age(latest.get('age', 0)),
+            'current_team': latest.get('team', 'Unknown'),
+            'position': latest.get('position', 'Unknown'),
+            'seasons_analyzed': len(season_progression),
+            'season_by_season': season_progression,
+            'trend_analysis': trend_analysis
+        }
+    
+    def _extract_age(self, age_value) -> int:
+        """Extract clean age from various age formats"""
+        age_str = str(age_value)
+        if '-' in age_str:
+            return int(age_str.split('-')[0])
+        else:
+            try:
+                return int(float(age_str))
+            except:
+                return 0
+    
+    def _calculate_performance_trends(self, season_progression) -> Dict[str, Any]:
+        """Calculate performance trends across seasons"""
+        
+        if len(season_progression) < 2:
+            return {'trend': 'insufficient_data', 'message': 'Need at least 2 seasons for trend analysis'}
+        
+        # Extract numeric progression
+        goals_progression = [s['goals'] for s in season_progression]
+        assists_progression = [s['assists'] for s in season_progression]
+        
+        # Simple trend calculation (last vs first season)
+        goals_trend = goals_progression[-1] - goals_progression[0] if len(goals_progression) >= 2 else 0
+        assists_trend = assists_progression[-1] - assists_progression[0] if len(assists_progression) >= 2 else 0
+        
+        # Determine overall trend
+        combined_trend = goals_trend + assists_trend
+        
+        if combined_trend > 2:
+            trend_label = "improving"
+        elif combined_trend < -2:
+            trend_label = "declining"  
+        else:
+            trend_label = "stable"
+        
+        return {
+            'trend': trend_label,
+            'goals_change': goals_trend,
+            'assists_change': assists_trend,
+            'combined_output_change': combined_trend,
+            'seasons_compared': f"{season_progression[0]['season']} → {season_progression[-1]['season']}"
+        }
 
 # Initialize the enhanced server
 server = EnhancedSoccerDataServer()
@@ -601,7 +815,7 @@ def handle_mcp_request(request):
                     "tools": [
                         {
                             "name": "search_players_advanced",
-                            "description": "Advanced player search with comprehensive filtering (leagues, positions, age range, stats)",
+                            "description": "Advanced player search with comprehensive filtering including season selection",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -611,6 +825,8 @@ def handle_mcp_request(request):
                                     "age_max": {"type": "integer", "description": "Maximum age"}, 
                                     "nationality": {"type": "array", "items": {"type": "string"}, "description": "Player nationalities"},
                                     "team": {"type": "string", "description": "Team name"},
+                                    "seasons": {"type": "array", "items": {"type": "string"}, "description": "Specific seasons (e.g., ['2024-25', '2023-24'])"},
+                                    "latest_season_only": {"type": "boolean", "description": "Show only latest season for each player"},
                                     "min_minutes_played": {"type": "integer", "description": "Minimum minutes played"},
                                     "stat_filters": {"type": "object", "description": "Statistical requirements (e.g., {'tackles_per_90': 1.5})"},
                                     "limit": {"type": "integer", "default": 50, "description": "Maximum results"},
@@ -631,6 +847,7 @@ def handle_mcp_request(request):
                                             "target_leagues": {"type": "array", "items": {"type": "string"}},
                                             "positions": {"type": "array", "items": {"type": "string"}},
                                             "age_range": {"type": "object", "properties": {"min": {"type": "integer"}, "max": {"type": "integer"}}},
+                                            "temporal_preferences": {"type": "object", "properties": {"seasons": {"type": "array", "items": {"type": "string"}}, "latest_season_only": {"type": "boolean"}}},
                                             "technical_requirements": {"type": "object"},
                                             "max_results": {"type": "integer", "default": 50}
                                         }
@@ -641,13 +858,14 @@ def handle_mcp_request(request):
                         },
                         {
                             "name": "get_league_leaders",
-                            "description": "Get top performers in a league for specific statistics",
+                            "description": "Get top performers in a league for specific statistics with season filtering",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "league": {"type": "string", "description": "League name"},
                                     "stat": {"type": "string", "description": "Statistic to rank by"},
                                     "position": {"type": "string", "description": "Filter by position"},
+                                    "season": {"type": "string", "description": "Specific season (e.g., '2024-25')"},
                                     "min_games": {"type": "integer", "default": 15, "description": "Minimum games played"}
                                 },
                                 "required": ["league", "stat"]
@@ -674,6 +892,18 @@ def handle_mcp_request(request):
                                     "player_name": {"type": "string", "description": "Player name"},
                                     "comparison_players": {"type": "array", "items": {"type": "string"}, "description": "Players to compare against"},
                                     "focus_areas": {"type": "array", "items": {"type": "string"}, "description": "Areas to focus analysis on"}
+                                },
+                                "required": ["player_name"]
+                            }
+                        },
+                        {
+                            "name": "get_player_career_summary",
+                            "description": "Get player career summary with temporal analysis and progression tracking",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "player_name": {"type": "string", "description": "Player name"},
+                                    "aggregation_mode": {"type": "string", "enum": ["latest", "career_avg", "best_season", "all_seasons"], "default": "latest", "description": "Analysis mode: latest season, career average, best season, or all seasons with progression"}
                                 },
                                 "required": ["player_name"]
                             }
@@ -729,6 +959,8 @@ def handle_mcp_request(request):
                 result = server.compare_multiple_players(**args)
             elif tool_name == 'generate_detailed_scouting_report':
                 result = server.generate_detailed_scouting_report(**args)
+            elif tool_name == 'get_player_career_summary':
+                result = server.get_player_career_summary(**args)
             # Legacy functions
             elif tool_name == 'search_players':
                 # Convert to advanced search
