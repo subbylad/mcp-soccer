@@ -407,36 +407,65 @@ class EnhancedSoccerDataServer:
     def compare_multiple_players(
         self,
         player_names: List[str],
+        season: Optional[str] = None,
+        aggregation_mode: str = "latest",
         focus_stats: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """Compare multiple players across key statistics"""
+        """Compare multiple players across key statistics with season alignment"""
         
         if not focus_stats:
             focus_stats = [
                 'goals', 'assists', 'expected_goals', 'shots_on_target_pct',
-                'pass_completion_pct', 'tackles_per_90', 'progressive_passes'
+                'pass_completion_pct', 'tackles_per_90', 'progressive_passes',
+                'minutes_played', 'games_played', 'expected_assists'
             ]
         
         comparison_data = {}
         players_found = []
+        target_season = season
+        
+        # If no season specified, find the most common season among requested players
+        if not target_season:
+            all_matches = []
+            for name in player_names:
+                matches = self.data[self.data['player'].str.contains(name, case=False, na=False)]
+                if len(matches) > 0:
+                    all_matches.extend(matches['season'].tolist())
+            
+            if all_matches:
+                # Use most recent season as default
+                target_season = max(all_matches)
         
         for player_name in player_names:
             matches = self.data[self.data['player'].str.contains(player_name, case=False, na=False)]
             
             if len(matches) > 0:
-                player = matches.iloc[0]
+                # Apply season filtering for fair comparison
+                if target_season:
+                    season_matches = matches[matches['season'] == target_season]
+                    if len(season_matches) > 0:
+                        player = season_matches.iloc[0]
+                    else:
+                        # Fall back to latest available season for this player
+                        player = matches.sort_values('season').iloc[-1]
+                        logger.warning(f"Player {player_name} not available in {target_season}, using {player.get('season')}")
+                else:
+                    # Use latest season if no target season
+                    player = matches.sort_values('season').iloc[-1]
+                
                 players_found.append(player_name)
                 
                 player_stats = {
                     'name': player.get('player', 'Unknown'),
-                    'age': int(player.get('age', 0)) if pd.notna(player.get('age')) else 0,
+                    'age': self._extract_age(player.get('age', 0)),
                     'team': player.get('team', 'Unknown'),
                     'league': player.get('league', 'Unknown'),
                     'position': player.get('position', 'Unknown'),
+                    'season': player.get('season', 'Unknown'),
                     'stats': {}
                 }
                 
-                # Extract focus statistics
+                # Extract focus statistics with enhanced coverage
                 for stat in focus_stats:
                     column_name = self.stat_mappings.get(stat, stat)
                     if column_name in player.index:
@@ -448,16 +477,20 @@ class EnhancedSoccerDataServer:
                 comparison_data[player_name] = player_stats
         
         return {
+            'comparison_season': target_season,
             'players_compared': len(players_found),
             'players_found': players_found,
             'players_not_found': [name for name in player_names if name not in players_found],
             'comparison_data': comparison_data,
-            'focus_statistics': focus_stats
+            'focus_statistics': focus_stats,
+            'season_alignment': 'enforced' if season else 'auto_detected'
         }
     
     def generate_detailed_scouting_report(
         self,
         player_name: str,
+        season: Optional[str] = None,
+        aggregation_mode: str = "latest",
         comparison_players: Optional[List[str]] = None,
         focus_areas: Optional[List[str]] = None
     ) -> Dict[str, Any]:
@@ -469,23 +502,49 @@ class EnhancedSoccerDataServer:
         if len(matches) == 0:
             return {'error': f"Player '{player_name}' not found"}
         
+        # Handle multiple matches intelligently
         if len(matches) > 1:
-            return {
-                'error': f"Multiple players found for '{player_name}'",
-                'options': [f"{row['player']} ({row['team']})" for _, row in matches.head(5).iterrows()]
-            }
+            # If season specified, filter by season first
+            if season:
+                season_matches = matches[matches['season'] == season]
+                if len(season_matches) > 0:
+                    matches = season_matches
+                else:
+                    return {'error': f"Player '{player_name}' not found in season {season}"}
+            
+            # If still multiple matches, use latest season or exact name match
+            if len(matches) > 1:
+                if aggregation_mode == "latest":
+                    # Get latest season for this player
+                    exact_name = matches.iloc[0]['player']
+                    player_seasons = matches[matches['player'] == exact_name]
+                    if len(player_seasons) > 0:
+                        matches = player_seasons.sort_values('season').tail(1)
+                    else:
+                        matches = matches.sort_values('season').tail(1)
+                else:
+                    # For other modes, prefer exact name match or return options
+                    exact_matches = matches[matches['player'].str.lower() == player_name.lower()]
+                    if len(exact_matches) > 0:
+                        matches = exact_matches
+                    else:
+                        unique_players = matches.drop_duplicates('player')[['player', 'team', 'season']].head(5)
+                        return {
+                            'error': f"Multiple players found for '{player_name}'. Please be more specific.",
+                            'options': [f"{row['player']} ({row['team']}, {row['season']})" for _, row in unique_players.iterrows()]
+                        }
         
         player = matches.iloc[0]
         
-        # Basic player information
+        # Basic player information with proper age handling
         basic_info = {
             'name': player.get('player', 'Unknown'),
-            'age': int(player.get('age', 0)) if pd.notna(player.get('age')) else 0,
+            'age': self._extract_age(player.get('age', 0)),
             'nationality': player.get('nation', 'Unknown'),
             'team': player.get('team', 'Unknown'),
             'league': player.get('league', 'Unknown'),
             'position': player.get('position', 'Unknown'),
-            'season': player.get('season', '2024-25')
+            'season': player.get('season', 'Unknown')
         }
         
         # Performance statistics organized by category
@@ -494,13 +553,19 @@ class EnhancedSoccerDataServer:
         passing_stats = self._extract_passing_stats(player)
         attacking_stats = self._extract_attacking_stats(player)
         
-        # Generate comparison if requested
+        # Generate comparison if requested (ensure same season)
         comparison_data = None
+        elite_peer_context = None
         if comparison_players:
+            player_season = player.get('season', 'Unknown')
             comparison_data = self.compare_multiple_players(
                 [player_name] + comparison_players,
+                season=player_season,
                 focus_stats=['goals', 'assists', 'expected_goals', 'tackles_per_90', 'pass_completion_pct']
             )
+        
+        # Add elite peer context for the player's position and league
+        elite_peer_context = self._get_elite_peer_context(player)
         
         return {
             'basic_info': basic_info,
@@ -509,6 +574,7 @@ class EnhancedSoccerDataServer:
             'passing_stats': passing_stats,
             'attacking_stats': attacking_stats,
             'comparison_data': comparison_data,
+            'elite_peer_context': elite_peer_context,
             'scouting_summary': self._generate_scouting_summary(player, focus_areas)
         }
     
@@ -588,6 +654,58 @@ class EnhancedSoccerDataServer:
             summary['defensive'] = f"Defender with solid defensive stats including {tackles} tackles."
         
         return summary
+    
+    def _get_elite_peer_context(self, player) -> Dict[str, Any]:
+        """Get elite peer context for comparative analysis"""
+        
+        player_league = player.get('league', 'Unknown')
+        player_position = player.get('position', 'Unknown')
+        player_season = player.get('season', 'Unknown')
+        
+        # Find elite players in same league, position, and season
+        position_filter = player_position.split(',')[0] if ',' in str(player_position) else player_position
+        
+        elite_peers = self.data[
+            (self.data['league'] == player_league) &
+            (self.data['position'].str.contains(position_filter, case=False, na=False)) &
+            (self.data['season'] == player_season) &
+            (self.data['playing_time_min'].fillna(0) >= 1000)  # Minimum playing time
+        ].copy()
+        
+        if len(elite_peers) < 5:
+            return {'message': 'Insufficient peer data for comparison'}
+        
+        # Calculate percentiles for key stats based on position
+        key_stats = ['performance_gls', 'performance_ast', 'expected_xg'] if 'FW' in str(position_filter) else ['tackles_tkl', 'interceptions', 'total_cmp_pct']
+        
+        player_percentiles = {}
+        for stat in key_stats:
+            if stat in elite_peers.columns and stat in player.index:
+                player_value = float(player.get(stat, 0)) if pd.notna(player.get(stat)) else 0
+                percentile = (elite_peers[stat].fillna(0) < player_value).mean() * 100
+                player_percentiles[stat] = round(percentile, 1)
+        
+        # Get top 5 performers in primary stat
+        primary_stat = key_stats[0] if key_stats else 'performance_gls'
+        top_performers = elite_peers.nlargest(5, primary_stat)
+        
+        elite_comparison = []
+        for _, elite_player in top_performers.iterrows():
+            elite_comparison.append({
+                'name': elite_player.get('player', 'Unknown'),
+                'team': elite_player.get('team', 'Unknown'),
+                'primary_stat_value': float(elite_player.get(primary_stat, 0)) if pd.notna(elite_player.get(primary_stat)) else 0
+            })
+        
+        return {
+            'league': player_league,
+            'position': player_position,
+            'season': player_season,
+            'peer_group_size': len(elite_peers),
+            'player_percentiles': player_percentiles,
+            'elite_comparison': elite_comparison,
+            'primary_stat': primary_stat
+        }
     
     def get_player_career_summary(
         self,
@@ -873,11 +991,13 @@ def handle_mcp_request(request):
                         },
                         {
                             "name": "compare_multiple_players",
-                            "description": "Compare multiple players across key statistics",
+                            "description": "Compare multiple players across key statistics with season alignment",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "player_names": {"type": "array", "items": {"type": "string"}, "description": "List of player names"},
+                                    "season": {"type": "string", "description": "Specific season for fair comparison (e.g., '2024-25')"},
+                                    "aggregation_mode": {"type": "string", "enum": ["latest", "career_avg", "best_season"], "default": "latest", "description": "Data aggregation mode"},
                                     "focus_stats": {"type": "array", "items": {"type": "string"}, "description": "Statistics to focus on"}
                                 },
                                 "required": ["player_names"]
@@ -885,11 +1005,13 @@ def handle_mcp_request(request):
                         },
                         {
                             "name": "generate_detailed_scouting_report",
-                            "description": "Generate comprehensive scouting report for a player",
+                            "description": "Generate comprehensive scouting report for a player with season control and elite peer context",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "player_name": {"type": "string", "description": "Player name"},
+                                    "season": {"type": "string", "description": "Specific season for analysis (e.g., '2024-25')"},
+                                    "aggregation_mode": {"type": "string", "enum": ["latest", "career_avg", "best_season"], "default": "latest", "description": "Data aggregation mode"},
                                     "comparison_players": {"type": "array", "items": {"type": "string"}, "description": "Players to compare against"},
                                     "focus_areas": {"type": "array", "items": {"type": "string"}, "description": "Areas to focus analysis on"}
                                 },
